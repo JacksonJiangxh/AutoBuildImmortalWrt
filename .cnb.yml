@@ -96,7 +96,8 @@
         # ======================================================================
         - name: "生成 Release 信息"
           script: |
-            ##[set-output TAG_NAME=x86-64-${LUCI_VERSION}-$(date +%Y%m%d-%H%M%S)]
+            TAG_NAME="x86-64-${LUCI_VERSION}-$(date +%Y%m%d-%H%M%S)"
+            echo "##[set-output TAG_NAME=${TAG_NAME}]"
             DOCKER_INFO="不带 Docker"
             if [ "${INCLUDE_DOCKER}" = "yes" ]; then
               DOCKER_INFO="默认带 Docker"
