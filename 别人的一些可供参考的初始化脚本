@@ -1,0 +1,212 @@
+#!/bin/sh
+# SingleArm单臂路由一体化初始化脚本 ImmortalWrt 25.12+
+# 仅负责基础系统配置，Docker配置请安装后执行后置脚本
+# 幂等设计，执行完成自删除
+exec >/tmp/singlearm-init.log 2>&1
+
+########################### 可自定义参数区 ###########################
+lan_ip_address="192.168.101.3/24"
+pppoe_username=""
+pppoe_password=""
+ula_prefix="fde7:d90e:a3bb::/48"
+dhcp_start="5"
+dhcp_limit="249"
+dhcp_leasetime="12h"
+wan_mtu="1492"
+pd_prefix_len="56"
+eth_dev="eth0"
+#####################################################################
+
+# 1. 基础网络配置
+if ! uci -q get network.lan; then
+    uci set network.lan=interface
+    uci set network.lan.ifname="$eth_dev"
+    uci set network.lan.proto="static"
+fi
+uci set network.lan.type=""
+uci set network.lan.ipaddr="$lan_ip_address"
+uci set network.lan.dns="223.5.5.5 223.6.6.6"
+
+# 全局ULA前缀
+if ! uci -q get network.globals.ula_prefix; then
+    uci set network.globals.ula_prefix="$ula_prefix"
+fi
+
+# WAN/PPPoE接口
+if ! uci -q get network.wan; then
+    uci set network.wan=interface
+    uci set network.wan.ifname="$eth_dev"
+    uci set network.wan.proto="pppoe"
+    uci set network.wan.username="$pppoe_username"
+    uci set network.wan.password="$pppoe_password"
+    uci set network.wan.mtu="$wan_mtu"
+fi
+
+# WAN6 DHCPv6-PD
+if ! uci -q get network.wan6; then
+    uci set network.wan6=interface
+    uci set network.wan6.ifname="$eth_dev"
+    uci set network.wan6.proto="dhcpv6"
+    uci set network.wan6.reqprefix="$pd_prefix_len"
+fi
+
+# 2. DHCP配置
+uci set dhcp.lan.start="$dhcp_start"
+uci set dhcp.lan.limit="$dhcp_limit"
+uci set dhcp.lan.leasetime="$dhcp_leasetime"
+uci set dhcp.lan.ra_server="server"
+uci set dhcp.lan.ra_management="1"
+if ! uci -q get dhcp.lan.suffix; then
+    uci set dhcp.lan.suffix="::%{ip4}"
+fi
+
+# 3. 防火墙基础配置（幂等校验，避免重复）
+## 全局优化
+uci set firewall.defaults.flow_offloading="1"
+uci set firewall.defaults.flow_offloading_hw="1"
+uci set firewall.defaults.fullcone="1"
+uci set firewall.defaults.fullcone6="0"
+uci set firewall.defaults.syn_flood="1"
+
+## LAN区域参数修正
+uci set firewall.@zone[0].name="lan"
+uci set firewall.@zone[0].network="lan"
+uci set firewall.@zone[0].input="ACCEPT"
+uci set firewall.@zone[0].output="ACCEPT"
+uci set firewall.@zone[0].forward="ACCEPT"
+
+## WAN区域（不存在才创建）
+if ! uci show firewall | grep -q "\.name='wan'"; then
+    uci add firewall zone
+    local wan_zone=$(uci -q find firewall zone | tail -n1)
+    uci set "$wan_zone".name="wan"
+    uci add_list "$wan_zone".network="wan"
+    uci add_list "$wan_zone".network="wan6"
+    uci set "$wan_zone".input="REJECT"
+    uci set "$wan_zone".output="ACCEPT"
+    uci set "$wan_zone".forward="DROP"
+    uci set "$wan_zone".masq="1"
+    uci set "$wan_zone".mtu_fix="1"
+fi
+
+## LAN->WAN转发（仅一条）
+if ! uci show firewall | grep -q "src='lan'.*dest='wan'"; then
+    uci add firewall forwarding
+    uci set firewall.@forwarding[-1].src="lan"
+    uci set firewall.@forwarding[-1].dest="wan"
+fi
+
+## ICMPv6全放行（仅一条）
+if ! uci show firewall | grep -q "name='Allow-ICMPv6-Base'"; then
+    uci add firewall rule
+    uci set firewall.@rule[-1].name="Allow-ICMPv6-Base"
+    uci set firewall.@rule[-1].src="*"
+    uci set firewall.@rule[-1].dest="*"
+    uci set firewall.@rule[-1].proto="icmpv6"
+    uci set firewall.@rule[-1].target="ACCEPT"
+fi
+
+## LAN出站UDP全放行（仅一条）
+if ! uci show firewall | grep -q "name='Allow-LAN-Out-UDP-Any'"; then
+    uci add firewall rule
+    uci set firewall.@rule[-1].name="Allow-LAN-Out-UDP-Any"
+    uci set firewall.@rule[-1].src="lan"
+    uci set firewall.@rule[-1].dest="wan"
+    uci set firewall.@rule[-1].proto="udp"
+    uci set firewall.@rule[-1].target="ACCEPT"
+fi
+
+# 4. 硬件加速配置
+cat > /etc/rc.local 
+#!/bin/sh
+# J3160 eth0 UDP GRO转发卸载优化
+ethtool -K eth0 rx-udp-gro-forwarding on rx-gro-list off
+exit 0
+EOF
+chmod +x /etc/rc.local
+
+# 5. 统一提交并生效
+uci commit network
+uci commit dhcp
+uci commit firewall
+
+service network reload
+service dnsmasq restart
+service odhcpd restart
+
+# 执行完成自删
+rm -f "$0"
+echo "基础系统初始化完成，日志：/tmp/singlearm-init.log"
+echo "Docker安装完成后，请执行Docker后置配置脚本"
+exit 0
+
+
+安装完docker之后要手动运行
+#!/bin/sh
+# Docker fw4兼容配置脚本（安装完dockerd后执行）
+# 适配ImmortalWrt 25.12+，关闭iptables自动注入，纯fw4管理
+exec >/tmp/docker-config.log 2>&1
+
+# 前置校验：确认dockerd已安装
+if ! uci -q get dockerd.globals; then
+    echo "错误：未检测到dockerd配置，请先安装docker相关软件包"
+    exit 1
+fi
+
+# 1. 核心配置：关闭Docker自动iptables/ip6tables注入，避免与fw4冲突
+uci set dockerd.globals.iptables='0'
+uci set dockerd.globals.ip6tables='0'
+uci set dockerd.globals.log_level='warn'
+# 默认数据目录，如需迁移到硬盘修改此处即可
+uci set dockerd.globals.data_root='/opt/docker/'
+
+# 2. 移除默认WAN阻断规则（iptables已关闭，该规则不再生效）
+uci -q del_list dockerd.@firewall[0].blocked_interfaces='wan'
+
+# 3. 触发dockerd自动创建docker网络接口与网桥（不存在才创建）
+if ! uci -q get network.docker; then
+    /etc/init.d/dockerd uciadd
+fi
+
+# 4. 防火墙Docker区域配置（幂等，不存在才创建）
+if ! uci show firewall | grep -q "\.name='docker'"; then
+    uci add firewall zone
+    local docker_zone=$(uci -q find firewall zone | tail -n1)
+    uci set "$docker_zone".name="docker"
+    uci set "$docker_zone".network="docker"
+    uci set "$docker_zone".input="ACCEPT"
+    uci set "$docker_zone".output="ACCEPT"
+    uci set "$docker_zone".forward="ACCEPT"
+fi
+
+# 5. 转发规则（各仅一条）
+## LAN  Docker 双向转发
+if ! uci show firewall | grep -q "src='lan'.*dest='docker'"; then
+    uci add firewall forwarding
+    uci set firewall.@forwarding[-1].src="lan"
+    uci set firewall.@forwarding[-1].dest="docker"
+fi
+if ! uci show firewall | grep -q "src='docker'.*dest='lan'"; then
+    uci add firewall forwarding
+    uci set firewall.@forwarding[-1].src="docker"
+    uci set firewall.@forwarding[-1].dest="lan"
+fi
+## Docker 访问外网
+if ! uci show firewall | grep -q "src='docker'.*dest='wan'"; then
+    uci add firewall forwarding
+    uci set firewall.@forwarding[-1].src="docker"
+    uci set firewall.@forwarding[-1].dest="wan"
+fi
+
+# 6. 提交配置并重启服务
+uci commit dockerd
+uci commit firewall
+
+/etc/init.d/firewall reload
+/etc/init.d/dockerd enable
+/etc/init.d/dockerd restart
+
+echo "Docker fw4兼容配置完成"
+echo "生效配置文件：/tmp/dockerd/daemon.json"
+exit 0
+
