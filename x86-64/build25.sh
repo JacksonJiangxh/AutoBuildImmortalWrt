@@ -63,7 +63,7 @@ PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn"
 PACKAGES="$PACKAGES openssh-sftp-server"
 
 #j3160
-PACKAGES="$PACKAGES luci-i18n-base-zh-cn luci-compat luci-lib-ipkg luci-theme-bootstrap ip-full tcpdump-mini e2fsprogs blkid luci-ssl-openssl kmod-tcp-bbr curl wget bind-dig htop i2c-tools lm-sensors openssh-sftp-server kmod-ipt-nat6 ip6tables zoneinfo-core zoneinfo-asia ntpd iperf3 wget-ssl fdisk resize2fs losetup"
+PACKAGES="$PACKAGES smartmontools badblocks luci-i18n-base-zh-cn luci-compat luci-lib-ipkg luci-theme-bootstrap ip-full tcpdump-mini e2fsprogs blkid luci-ssl-openssl kmod-tcp-bbr curl wget bind-dig htop i2c-tools lm-sensors openssh-sftp-server kmod-ipt-nat6 ip6tables zoneinfo-core zoneinfo-asia ntpd iperf3 wget-ssl fdisk resize2fs losetup"
 # USB拓展坞网卡
 PACKAGES="$PACKAGES kmod-usb-core kmod-usb2 kmod-usb-net kmod-mii kmod-usb-net-cdc-ether"
 
