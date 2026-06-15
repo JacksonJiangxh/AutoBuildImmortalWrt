@@ -2,209 +2,130 @@
 # CNB 云原生构建流水线 - x86-64 ImmortalWrt 25.12.x
 # 从 GitHub Actions (build-x86-64-immortalwrt-25.12.x) 迁移适配
 # ============================================================================
-# 路径映射说明:
-#   GitHub Actions: ${{ github.workspace }} → CNB: $(pwd) (仓库根目录)
-#   所有 Docker volume 挂载路径从 GitHub workspace 绝对路径改为相对路径
+# 触发方式: 通过 .cnb/web_trigger.yml 中定义的「构建 x86-64 ImmortalWrt 25.12.x 固件」按钮
+# 触发事件: web_trigger_build_x86_64_25
 # ============================================================================
 
-on:
-  manual:
-    title: "构建 x86-64 ImmortalWrt 25.12.x 固件"
-    inputs:
-      luci_version:
-        description: "选择 luci 版本"
-        required: false
-        default: "25.12.0"
-        type: choice
-        options:
-          - "25.12.0-rc1"
-          - "25.12.0-rc2"
-          - "25.12.0"
-      custom_router_ip:
-        description: "路由器管理地址 (仅对多网口路由器有效) 格式: 192.168.x.1 或 10.x.x.1"
-        required: true
-        default: "192.168.100.1"
-      profile:
-        description: "固件大小 单位(MB)"
-        required: true
-        default: "1024"
-      include_docker:
-        description: "是否编译 Docker 插件"
-        required: true
-        default: "yes"
-        type: choice
-        options:
-          - "yes"
-          - "no"
-      enable_pppoe:
-        description: "是否配置 PPPoE 拨号信息?"
-        required: true
-        default: "no"
-        type: choice
-        options:
-          - "yes"
-          - "no"
-      pppoe_account:
-        description: "宽带账号 (若启用PPPoE)"
-        required: false
-        default: ""
-      pppoe_password:
-        description: "宽带密码 (若启用PPPoE)"
-        required: false
-        default: ""
+"$":
+  web_trigger_build_x86_64_25:
+    - name: "构建 x86-64 ImmortalWrt 25.12.x 固件"
+      docker:
+        image: ubuntu:22.04
+      services:
+        - docker
+      stages:
+        # ======================================================================
+        # Step 1: 初始化 — 设置脚本权限
+        # ======================================================================
+        - name: "设置脚本执行权限"
+          script: |
+            chmod +x x86-64/build25.sh
+            echo "✅ 脚本权限设置完成"
 
-jobs:
-  build:
-    # CNB 使用 docker runner，需要访问 docker socket
-    runs-on: docker
-    steps:
-      # ======================================================================
-      # Step 1: 初始化 — 设置脚本权限
-      # GitHub Actions: chmod +x ${{ github.workspace }}/x86-64/build25.sh
-      # CNB: 仓库已在工作目录检出，直接使用相对路径
-      # ======================================================================
-      - name: "设置脚本执行权限"
-        run: |
-          chmod +x x86-64/build25.sh
-          echo "✅ 脚本权限设置完成"
+        # ======================================================================
+        # Step 2: 保存自定义路由器 IP
+        # ======================================================================
+        - name: "保存自定义路由器管理IP"
+          script: |
+            mkdir -p custom
+            echo "$CUSTOM_ROUTER_IP" > custom/custom_router_ip.txt
+            echo "📡 路由器管理地址: $CUSTOM_ROUTER_IP"
+            echo "   (该文件将在构建时映射到 /etc/config/custom_router_ip.txt)"
 
-      # ======================================================================
-      # Step 2: 保存自定义路由器 IP
-      # GitHub Actions: mkdir -p "${{ github.workspace }}/custom"
-      # CNB: mkdir -p custom (在仓库根目录)
-      # ======================================================================
-      - name: "保存自定义路由器管理IP"
-        run: |
-          mkdir -p custom
-          echo "$CUSTOM_ROUTER_IP" > custom/custom_router_ip.txt
-          echo "📡 路由器管理地址: $CUSTOM_ROUTER_IP"
-          echo "   (该文件将在构建时映射到 /etc/config/custom_router_ip.txt)"
-        env:
-          CUSTOM_ROUTER_IP: ${{ inputs.custom_router_ip }}
+        # ======================================================================
+        # Step 3: 验证 PPPoE 参数
+        # ======================================================================
+        - name: "验证 PPPoE 输入参数"
+          script: |
+            if [ "$ENABLE_PPPOE" = "yes" ]; then
+              if [ -z "$PPPOE_ACCOUNT" ] || [ -z "$PPPOE_PASSWORD" ]; then
+                echo "❌ 错误: 启用 PPPoE 时必须提供宽带账号和密码!"
+                exit 1
+              fi
+              echo "✅ PPPoE 参数验证通过"
+            else
+              echo "ℹ️  未启用 PPPoE，跳过验证"
+            fi
 
-      # ======================================================================
-      # Step 3: 验证 PPPoE 参数
-      # ======================================================================
-      - name: "验证 PPPoE 输入参数"
-        run: |
-          if [ "$ENABLE_PPPOE" = "yes" ]; then
-            if [ -z "$PPPOE_ACCOUNT" ] || [ -z "$PPPOE_PASSWORD" ]; then
-              echo "❌ 错误: 启用 PPPoE 时必须提供宽带账号和密码!"
+        # ======================================================================
+        # Step 4: 构建 ImmortalWrt x86-64 EFI 固件
+        # ======================================================================
+        - name: "构建 ImmortalWrt x86-64 EFI 25.12.x 固件"
+          script: |
+            WORKSPACE="$(pwd)"
+            echo "🔨 构建参数:"
+            echo "   Luci 版本: ${LUCI_VERSION}"
+            echo "   固件大小: ${PROFILE} MB"
+            echo "   Docker: ${INCLUDE_DOCKER}"
+            echo "   PPPoE: ${ENABLE_PPPOE}"
+            echo "   工作目录: ${WORKSPACE}"
+
+            # 确保 bin 目录存在且干净
+            rm -rf "${WORKSPACE}/bin"
+            mkdir -p "${WORKSPACE}/bin"
+
+            # 运行 ImmortalWrt ImageBuilder Docker 容器
+            docker run --rm -i \
+              --user root \
+              -v "${WORKSPACE}/bin:/home/build/immortalwrt/bin" \
+              -v "${WORKSPACE}/files:/home/build/immortalwrt/files" \
+              -v "${WORKSPACE}/custom:/home/build/immortalwrt/files/etc/config" \
+              -v "${WORKSPACE}/x86-64/imm25.config:/home/build/immortalwrt/.config" \
+              -v "${WORKSPACE}/shell:/home/build/immortalwrt/shell" \
+              -v "${WORKSPACE}/x86-64/build25.sh:/home/build/immortalwrt/build.sh" \
+              -e PROFILE="${PROFILE}" \
+              -e INCLUDE_DOCKER="${INCLUDE_DOCKER}" \
+              -e ENABLE_PPPOE="${ENABLE_PPPOE}" \
+              -e PPPOE_ACCOUNT="${PPPOE_ACCOUNT}" \
+              -e PPPOE_PASSWORD="${PPPOE_PASSWORD}" \
+              immortalwrt/imagebuilder:x86-64-openwrt-${LUCI_VERSION} \
+              /bin/bash /home/build/immortalwrt/build.sh
+
+            if [ $? -ne 0 ]; then
+              echo "❌ 固件构建失败!"
               exit 1
             fi
-            echo "✅ PPPoE 参数验证通过"
-          else
-            echo "ℹ️  未启用 PPPoE，跳过验证"
-          fi
-        env:
-          ENABLE_PPPOE: ${{ inputs.enable_pppoe }}
-          PPPOE_ACCOUNT: ${{ inputs.pppoe_account }}
-          PPPOE_PASSWORD: ${{ inputs.pppoe_password }}
 
-      # ======================================================================
-      # Step 4: 构建 ImmortalWrt x86-64 EFI 固件
-      #
-      # 路径映射关键变化:
-      #   GitHub Actions                          → CNB
-      #   ${{ github.workspace }}/bin             → $(pwd)/bin
-      #   ${{ github.workspace }}/files           → $(pwd)/files
-      #   ${{ github.workspace }}/custom          → $(pwd)/custom
-      #   ${{ github.workspace }}/x86-64/imm25.config → $(pwd)/x86-64/imm25.config
-      #   ${{ github.workspace }}/shell           → $(pwd)/shell
-      #   ${{ github.workspace }}/x86-64/build25.sh → $(pwd)/x86-64/build25.sh
-      #
-      # 注意: 容器内部路径 /home/build/immortalwrt/ 保持不变
-      #       这是 ImmortalWrt ImageBuilder Docker 容器的固定工作目录
-      # ======================================================================
-      - name: "构建 ImmortalWrt x86-64 EFI 25.12.x 固件"
-        run: |
-          WORKSPACE="$(pwd)"
-          echo "🔨 构建参数:"
-          echo "   Luci 版本: ${LUCI_VERSION}"
-          echo "   固件大小: ${PROFILE} MB"
-          echo "   Docker: ${INCLUDE_DOCKER}"
-          echo "   PPPoE: ${ENABLE_PPPOE}"
-          echo "   工作目录: ${WORKSPACE}"
+            echo "✅ 固件构建成功!"
+            echo ""
+            echo "📦 构建产物:"
+            find "${WORKSPACE}/bin" -name "*.img.gz" -exec ls -lh {} \;
 
-          # 确保 bin 目录存在且干净
-          rm -rf "${WORKSPACE}/bin"
-          mkdir -p "${WORKSPACE}/bin"
+        # ======================================================================
+        # Step 5: 生成 Release 标签和描述
+        # ======================================================================
+        - name: "生成 Release 信息"
+          script: |
+            ##[set-output TAG_NAME=x86-64-${LUCI_VERSION}-$(date +%Y%m%d-%H%M%S)]
+            DOCKER_INFO="不带 Docker"
+            if [ "${INCLUDE_DOCKER}" = "yes" ]; then
+              DOCKER_INFO="默认带 Docker"
+            fi
+            ##[set-output TAG_DESCRIPTION=## 路由器后台信息
+            - 后台地址: ${CUSTOM_ROUTER_IP}
+            - 用户名: root
+            - 密码: 无
+            - ${DOCKER_INFO}]
+          exports:
+            TAG_NAME: TAG_NAME
+            TAG_DESCRIPTION: TAG_DESCRIPTION
 
-          # 运行 ImmortalWrt ImageBuilder Docker 容器
-          docker run --rm -i \
-            --user root \
-            -v "${WORKSPACE}/bin:/home/build/immortalwrt/bin" \
-            -v "${WORKSPACE}/files:/home/build/immortalwrt/files" \
-            -v "${WORKSPACE}/custom:/home/build/immortalwrt/files/etc/config" \
-            -v "${WORKSPACE}/x86-64/imm25.config:/home/build/immortalwrt/.config" \
-            -v "${WORKSPACE}/shell:/home/build/immortalwrt/shell" \
-            -v "${WORKSPACE}/x86-64/build25.sh:/home/build/immortalwrt/build.sh" \
-            -e PROFILE="${PROFILE}" \
-            -e INCLUDE_DOCKER="${INCLUDE_DOCKER}" \
-            -e ENABLE_PPPOE="${ENABLE_PPPOE}" \
-            -e PPPOE_ACCOUNT="${PPPOE_ACCOUNT}" \
-            -e PPPOE_PASSWORD="${PPPOE_PASSWORD}" \
-            immortalwrt/imagebuilder:x86-64-openwrt-${LUCI_VERSION} \
-            /bin/bash /home/build/immortalwrt/build.sh
+        # ======================================================================
+        # Step 6: 创建 Release — CNB 内置 git:release action
+        # ======================================================================
+        - name: "创建 Release"
+          type: git:release
+          options:
+            overlying: true
+            tag: ${TAG_NAME}
+            description: ${TAG_DESCRIPTION}
 
-          if [ $? -ne 0 ]; then
-            echo "❌ 固件构建失败!"
-            exit 1
-          fi
-
-          echo "✅ 固件构建成功!"
-          echo ""
-          echo "📦 构建产物:"
-          find "${WORKSPACE}/bin" -name "*.img.gz" -exec ls -lh {} \;
-        env:
-          LUCI_VERSION: ${{ inputs.luci_version }}
-          PROFILE: ${{ inputs.profile }}
-          INCLUDE_DOCKER: ${{ inputs.include_docker }}
-          ENABLE_PPPOE: ${{ inputs.enable_pppoe }}
-          PPPOE_ACCOUNT: ${{ inputs.pppoe_account }}
-          PPPOE_PASSWORD: ${{ inputs.pppoe_password }}
-
-      # ======================================================================
-      # Step 5: 生成 Release 标签 (导出为 TAG_NAME)
-      # ======================================================================
-      - name: "生成 Release 标签"
-        script: echo "x86-64-${LUCI_VERSION}-$(date +%Y%m%d-%H%M%S)"
-        exports:
-          info: TAG_NAME
-
-      # ======================================================================
-      # Step 6: 生成 Release 描述 (导出为 TAG_DESCRIPTION)
-      # ======================================================================
-      - name: "生成 Release 描述"
-        script: |
-          DOCKER_INFO="不带 Docker"
-          if [ "${INCLUDE_DOCKER}" = "yes" ]; then
-            DOCKER_INFO="默认带 Docker"
-          fi
-          echo "## 路由器后台信息
-          - 后台地址: ${CUSTOM_ROUTER_IP}
-          - 用户名: root
-          - 密码: 无
-          - ${DOCKER_INFO}"
-        exports:
-          info: TAG_DESCRIPTION
-
-      # ======================================================================
-      # Step 7: 创建 Release — CNB 内置 git:release action
-      # ======================================================================
-      - name: "创建 Release"
-        type: git:release
-        options:
-          overlying: true
-          tag: ${TAG_NAME}
-          description: ${TAG_DESCRIPTION}
-
-      # ======================================================================
-      # Step 8: 上传固件附件 — CNB 内置 attachments 插件
-      # ======================================================================
-      - name: "上传固件附件"
-        image: cnbcool/attachments:latest
-        settings:
-          tag: ${TAG_NAME}
-          attachments:
-            - bin/targets/x86/64/*squashfs-combined-efi.img.gz
+        # ======================================================================
+        # Step 7: 上传固件附件 — CNB 内置 attachments 插件
+        # ======================================================================
+        - name: "上传固件附件"
+          image: cnbcool/attachments:latest
+          settings:
+            tag: ${TAG_NAME}
+            attachments:
+              - bin/targets/x86/64/*squashfs-combined-efi.img.gz
