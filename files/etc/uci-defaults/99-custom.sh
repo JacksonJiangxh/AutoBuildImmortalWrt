@@ -245,6 +245,7 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     enable_pppoe="no"
 else
     . "$SETTINGS_FILE"
+    echo "PPPoE settings loaded: enable_pppoe=$enable_pppoe account_len=${#pppoe_account} pass_len=${#pppoe_password}" >>$LOGFILE
 fi
 
 # ============================================================================
@@ -252,11 +253,44 @@ fi
 # ============================================================================
 echo ">>> Detecting physical interfaces..." >>$LOGFILE
 
+# 等待 USB 网卡就绪（部分 x86 设备使用 USB 外接网卡，启动早期可能未初始化）
+# 最多等待 15 秒，每 2 秒检查一次
+MAX_WAIT=15
+WAITED=0
+while [ $WAITED -lt $MAX_WAIT ]; do
+    eth_count=0
+    for iface in /sys/class/net/*; do
+        iface_name=$(basename "$iface")
+        if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en'; then
+            eth_count=$((eth_count + 1))
+        fi
+    done
+    if [ $eth_count -ge 2 ]; then
+        echo "  $eth_count eth interfaces detected after ${WAITED}s" >>$LOGFILE
+        break
+    fi
+    sleep 2
+    WAITED=$((WAITED + 2))
+done
+
 ifnames=""
 for iface in /sys/class/net/*; do
     iface_name=$(basename "$iface")
-    if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en'; then
-        ifnames="$ifnames $iface_name"
+    # 跳过虚拟接口（lo、docker*、br-*、veth*、ppp*、wg*、tun*、tap* 等）
+    case "$iface_name" in
+        lo|docker*|br-*|veth*|ppp*|wg*|tun*|tap*|sit*|ip6tnl*|gre*|gretap*|ip_vti*|erspan*) continue ;;
+    esac
+    # 检测物理网口：有 device 符号链接，或 type=1（以太网）且名字匹配 eth/en
+    if [ -e "$iface/device" ]; then
+        if echo "$iface_name" | grep -Eq '^eth|^en'; then
+            ifnames="$ifnames $iface_name"
+        fi
+    elif [ "$(cat "$iface/type" 2>/dev/null)" = "1" ]; then
+        # 备用检测：ARPPHRD_ETHER = 1，某些驱动不创建 device 符号链接
+        if echo "$iface_name" | grep -Eq '^eth|^en'; then
+            ifnames="$ifnames $iface_name"
+            echo "  Fallback detection: $iface_name (type=1, no device symlink)" >>$LOGFILE
+        fi
     fi
 done
 ifnames=$(echo "$ifnames" | awk '{$1=$1};1')
@@ -276,11 +310,15 @@ case "$board_name" in
         lan_ifnames="eth0"
         ;;
     *)
+        # 默认：按字母序第一个网口做 WAN，其余做 LAN
+        # 注意：x86 设备网口顺序取决于内核枚举（通常 PCI 总线序），可能与物理面板标注不一致
+        # 如果发现 WAN/LAN 颠倒，请在刷机后手动调整 /etc/config/network
         wan_ifname=$(echo "$ifnames" | awk '{print $1}')
         lan_ifnames=$(echo "$ifnames" | cut -d ' ' -f2-)
         ;;
 esac
 echo "WAN=$wan_ifname LAN=$lan_ifnames" >>"$LOGFILE"
+echo "  NOTE: If WAN/LAN assignment is reversed, manually edit /etc/config/network after boot." >>"$LOGFILE"
 
 # ============================================================================
 # 第5部分：网络接口配置
@@ -299,13 +337,25 @@ if [ "$count" -eq 1 ]; then
 
 elif [ "$count" -gt 1 ]; then
     # ---- 多网口模式 ----
-    echo "  Multi-NIC mode: WAN=$wan_ifname" >>$LOGFILE
+    echo "  Multi-NIC mode: WAN=$wan_ifname LAN=$lan_ifnames" >>$LOGFILE
 
-    # 5.1 配置 WAN（IPv4 DHCP）
+    # 5.1 配置 WAN
+    # 根据 PPPoE 开关决定协议：先判断避免重复设置
     uci set network.wan=interface
     uci set network.wan.device="$wan_ifname"
-    uci set network.wan.proto='dhcp'
-    uci set network.wan.mtu="$WAN_MTU"
+
+    if [ "$enable_pppoe" = "yes" ]; then
+        echo "  PPPoE mode enabled, setting WAN proto=pppoe" >>$LOGFILE
+        uci set network.wan.proto='pppoe'
+        uci set network.wan.username="$pppoe_account"
+        uci set network.wan.password="$pppoe_password"
+        uci set network.wan.peerdns='1'
+        uci set network.wan.auto='1'
+        uci set network.wan.mtu='1492'
+    else
+        uci set network.wan.proto='dhcp'
+        uci set network.wan.mtu="$WAN_MTU"
+    fi
 
     # 5.2 配置 WAN6（IPv6 DHCPv6-PD，获取公网前缀）
     uci set network.wan6=interface
@@ -316,6 +366,11 @@ elif [ "$count" -gt 1 ]; then
     # 默认路由优先级：IPv4 优先（国内 CDN 兼容），IPv6 次之
     uci set network.wan6.defaultroute='1'
     uci set network.wan6.metric='512'
+
+    # PPPoE 模式下，wan6 应绑定到 ppp 虚接口而非物理网口
+    if [ "$enable_pppoe" = "yes" ]; then
+        uci set network.wan6.device='@wan'
+    fi
 
     # 5.3 配置 br-lan 网桥端口
     section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
@@ -346,22 +401,6 @@ elif [ "$count" -gt 1 ]; then
     else
         uci set network.lan.ipaddr='192.168.100.1'
         echo "  Default router IP: 192.168.100.1" >>$LOGFILE
-    fi
-
-    # 5.5 PPPoE 拨号模式
-    if [ "$enable_pppoe" = "yes" ]; then
-        echo "  PPPoE mode enabled" >>$LOGFILE
-        uci set network.wan.proto='pppoe'
-        uci set network.wan.username="$pppoe_account"
-        uci set network.wan.password="$pppoe_password"
-        uci set network.wan.peerdns='1'
-        uci set network.wan.auto='1'
-        uci set network.wan.mtu='1492'
-        # PPPoE 拨号时，IPv6 通常由 PPP 链路自动获取
-        # 如果 ISP 支持 IPv6 over PPP，保留 wan6 为 dhcpv6
-        # 如果不支持，设为 none
-        uci set network.wan6.ifname='@wan'  # PPPoE 拨号后 wan6 绑定到 ppp 接口
-        echo "  PPPoE configured" >>$LOGFILE
     fi
 
     uci commit network
