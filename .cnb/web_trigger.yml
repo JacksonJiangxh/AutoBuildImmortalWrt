@@ -8,7 +8,7 @@ branch:
         description: "手动触发 ImmortalWrt x86-64 EFI 25.12.x 固件构建流程"
         event: web_trigger_build_x86_64_25
         inputs:
-          luci_version:
+          LUCI_VERSION:
             name: "选择 luci 版本"
             type: select
             options:
@@ -16,33 +16,33 @@ branch:
               - { name: "25.12.0-rc2", value: "25.12.0-rc2" }
               - { name: "25.12.0", value: "25.12.0" }
             default: "25.12.0"
-          custom_router_ip:
+          CUSTOM_ROUTER_IP:
             name: "路由器管理地址 (仅对多网口路由器有效) 格式: 192.168.x.1 或 10.x.x.1"
             type: input
             default: "192.168.100.1"
-          profile:
+          PROFILE:
             name: "固件大小 单位(MB)"
             type: input
             default: "1024"
-          include_docker:
+          INCLUDE_DOCKER:
             name: "是否编译 Docker 插件"
             type: select
             options:
               - { name: "yes", value: "yes" }
               - { name: "no", value: "no" }
             default: "yes"
-          enable_pppoe:
+          ENABLE_PPPOE:
             name: "是否配置 PPPoE 拨号信息?"
             type: select
             options:
               - { name: "yes", value: "yes" }
               - { name: "no", value: "no" }
             default: "no"
-          pppoe_account:
+          PPPOE_ACCOUNT:
             name: "宽带账号 (若启用PPPoE)"
             type: input
             default: ""
-          pppoe_password:
+          PPPOE_PASSWORD:
             name: "宽带密码 (若启用PPPoE)"
             type: input
             default: ""
