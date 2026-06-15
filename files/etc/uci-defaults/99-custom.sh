@@ -70,7 +70,8 @@ if [ -n "$lan_zone_idx" ]; then
     uci set firewall.@zone[$lan_zone_idx].input='ACCEPT'
     uci set firewall.@zone[$lan_zone_idx].output='ACCEPT'
     uci set firewall.@zone[$lan_zone_idx].forward='ACCEPT'
-    # LAN zone 同时覆盖 IPv4+IPv6 网络
+    # LAN zone 同时覆盖 IPv4+IPv6 网络（先删除已有避免重复）
+    uci -q del_list firewall.@zone[$lan_zone_idx].network='lan'
     uci add_list firewall.@zone[$lan_zone_idx].network='lan'
 fi
 
