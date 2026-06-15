@@ -101,11 +101,12 @@
             if [ "${INCLUDE_DOCKER}" = "yes" ]; then
               DOCKER_INFO="默认带 Docker"
             fi
-            ##[set-output TAG_DESCRIPTION=## 路由器后台信息
-            - 后台地址: ${CUSTOM_ROUTER_IP}
-            - 用户名: root
-            - 密码: 无
-            - ${DOCKER_INFO}]
+            DESC="## 路由器后台信息"
+            DESC="${DESC}\n- 后台地址: ${CUSTOM_ROUTER_IP}"
+            DESC="${DESC}\n- 用户名: root"
+            DESC="${DESC}\n- 密码: 无"
+            DESC="${DESC}\n- ${DOCKER_INFO}"
+            echo "##[set-output TAG_DESCRIPTION=${DESC}]"
           exports:
             TAG_NAME: TAG_NAME
             TAG_DESCRIPTION: TAG_DESCRIPTION
