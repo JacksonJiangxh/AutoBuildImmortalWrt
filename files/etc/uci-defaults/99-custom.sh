@@ -9,6 +9,22 @@ echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
 # 具体操作方法：网络——防火墙 在wan的入站数据 下拉选项里选择 拒绝 保存并应用即可。
 uci set firewall.@zone[1].input='ACCEPT'
 
+# 配置硬件加速：Flow Offloading 流量卸载
+# 大幅提升 NAT 转发性能，降低 CPU 占用
+uci set firewall.defaults.flow_offloading='1'
+uci set firewall.defaults.flow_offloading_hw='1'
+
+# 配置 Full Cone NAT（全锥 NAT）
+# 改善 P2P 游戏、视频通话、远程桌面等连接质量
+uci set firewall.defaults.fullcone='1'
+uci set firewall.defaults.fullcone6='0'
+
+# 启用 SYN Flood 防护
+uci set firewall.defaults.syn_flood='1'
+
+# 提交防火墙配置
+uci commit firewall
+
 # 设置主机名映射，解决安卓原生 TV 无法联网的问题
 uci add dhcp domain
 uci set "dhcp.@domain[-1].name=time.android.com"
@@ -166,31 +182,80 @@ if [ -f /usr/bin/quickfile ]; then
     echo "fix quickfile nginx config" >>$LOGFILE
 fi
 
-# 若安装了dockerd 则设置docker的防火墙规则
-# 扩大docker涵盖的子网范围 '172.16.0.0/12'
-# 方便各类docker容器的端口顺利通过防火墙 
+# 配置硬件卸载：ethtool GRO 优化
+# 对所有物理网卡启用 UDP GRO 转发，提升 UDP 流量性能
+# 同时关闭 rx-gro-list 避免兼容性问题
+cat > /etc/rc.local <<'EOF'
+#!/bin/sh
+# 硬件卸载优化配置
+
+# 获取所有物理网卡并应用 ethtool 优化
+for iface in /sys/class/net/*; do
+    iface_name=$(basename "$iface")
+    if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en'; then
+        ethtool -K "$iface_name" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null
+    fi
+done
+
+exit 0
+EOF
+chmod +x /etc/rc.local
+
+# 若安装了dockerd 则配置 Docker
+# 1. 关闭 Docker 自动 iptables 注入，避免与 fw4 冲突
+# 2. 配置防火墙规则，扩大 docker 涵盖的子网范围 '172.16.0.0/12'
 if command -v dockerd >/dev/null 2>&1; then
-    echo "检测到 Docker，正在配置防火墙规则..."
+    echo "检测到 Docker，正在配置..."
+    echo "检测到 Docker，正在配置..." >>$LOGFILE
+
+    # 步骤1：配置 Dockerd 全局参数
+    # 关闭 Docker 自动 iptables/ip6tables 注入
+    # 让防火墙完全由 OpenWrt fw4 管理，避免规则冲突
+    if uci -q get dockerd.globals >/dev/null 2>&1; then
+        uci set dockerd.globals.iptables='0'
+        uci set dockerd.globals.ip6tables='0'
+        uci set dockerd.globals.log_level='warn'
+        # 默认数据目录，如需迁移到硬盘修改此处即可
+        uci set dockerd.globals.data_root='/opt/docker/'
+        # 配置 Docker 日志限制，防止日志无限增长占满存储空间
+        # 每个容器日志文件最大 10MB，最多保留 5 个日志文件
+        # OpenWrt dockerd 通过这些 UCI 选项生成 daemon.json 中的 log-opts
+        uci add_list dockerd.globals.log_opt='max-size=10m'
+        uci add_list dockerd.globals.log_opt='max-file=5'
+        uci commit dockerd
+        echo "已配置 Dockerd：关闭 iptables 注入，数据目录 /opt/docker/，日志限制 10MB×5" >>$LOGFILE
+    fi
+
+    # 步骤2：移除 Dockerd 默认的 WAN 阻断规则
+    # iptables 已关闭，该规则不再生效且可能造成干扰
+    if uci -q get dockerd.@firewall[0] >/dev/null 2>&1; then
+        uci -q del_list dockerd.@firewall[0].blocked_interfaces='wan'
+        uci commit dockerd
+    fi
+
+    # 步骤3：配置 Docker 防火墙规则（使用子网模式，更灵活）
     FW_FILE="/etc/config/firewall"
 
-    # 删除所有名为 docker 的 zone
-    uci delete firewall.docker
+    # 先清理旧的 Docker 相关配置（幂等操作）
+    # 删除 docker zone（如果存在）
+    if uci -q get firewall.docker >/dev/null 2>&1; then
+        uci delete firewall.docker
+    fi
 
-    # 先获取所有 forwarding 索引，倒序排列删除
+    # 删除所有 docker 相关的 forwarding 规则（倒序遍历避免索引问题）
     for idx in $(uci show firewall | grep "=forwarding" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
-        src=$(uci get firewall.@forwarding[$idx].src 2>/dev/null)
-        dest=$(uci get firewall.@forwarding[$idx].dest 2>/dev/null)
-        echo "Checking forwarding index $idx: src=$src dest=$dest"
+        src=$(uci -q get firewall.@forwarding[$idx].src 2>/dev/null)
+        dest=$(uci -q get firewall.@forwarding[$idx].dest 2>/dev/null)
         if [ "$src" = "docker" ] || [ "$dest" = "docker" ]; then
-            echo "Deleting forwarding @forwarding[$idx]"
             uci delete firewall.@forwarding[$idx]
         fi
     done
-    # 提交删除
+
+    # 提交删除操作
     uci commit firewall
 
-# 追加新的 zone + forwarding 配置
-cat <<EOF >>"$FW_FILE"
+    # 追加新的 zone + forwarding 配置（使用子网 172.16.0.0/12 覆盖所有 Docker 网段）
+    cat <<'EOF' >>"$FW_FILE"
 
 config zone 'docker'
   option input 'ACCEPT'
@@ -212,8 +277,10 @@ config forwarding
   option dest 'docker'
 EOF
 
+    echo "Docker 防火墙规则配置完成" >>$LOGFILE
+
 else
-    echo "未检测到 Docker，跳过防火墙配置。"
+    echo "未检测到 Docker，跳过配置。"
 fi
 
 exit 0
