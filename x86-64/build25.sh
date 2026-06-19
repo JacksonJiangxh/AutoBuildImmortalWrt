@@ -63,8 +63,7 @@ PACKAGES="$PACKAGES openssh-sftp-server"
 # 合并imm仓库以外的第三方插件 暂时注释
 PACKAGES="$PACKAGES $CUSTOM_PACKAGES"
 # USB拓展坞网卡
-PACKAGES="$PACKAGES kmod-usb-core kmod-usb2 kmod-usb-net kmod-mii kmod-usb-net-cdc-ether kmod-usb-net-rtl8152"
-
+PACKAGES="$PACKAGES kmod-usb-core kmod-usb2 kmod-usb-net kmod-mii kmod-usb-net-cdc-ether kmod-usb-net-rndis"
 # 判断是否需要编译 Docker 插件
 if [ "$INCLUDE_DOCKER" = "yes" ]; then
     PACKAGES="$PACKAGES luci-i18n-dockerman-zh-cn"
